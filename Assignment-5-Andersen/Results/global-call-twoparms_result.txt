@@ -1,0 +1,72 @@
+Writing '/home/zyl94/assignment-5-andersen-zyi952694-crypto/Assignment-5-Andersen/Test-Cases/global-call-twoparms.bc.consg.dot'...
+========== Andersen Points-to Results ==========
+Var 0 -> {  }
+Var 1 -> {  }
+Var 2 -> {  }
+Var 3 -> {  }
+Var 4 -> { 6 }
+Var 6 -> {  }
+Var 7 -> { 8 }
+Var 8 -> {  }
+Var 9 -> { 12 }
+Var 10 -> {  }
+Var 12 -> {  }
+Var 13 -> { 14 }
+Var 14 -> { 12 }
+Var 16 -> {  }
+Var 17 -> {  }
+Var 18 -> { 19 }
+Var 19 -> {  }
+Var 20 -> { 21 }
+Var 21 -> {  }
+Var 24 -> {  }
+Var 26 -> {  }
+Var 29 -> { 30 }
+Var 30 -> { 12 }
+Var 32 -> {  }
+Var 33 -> {  }
+Var 34 -> { 35 }
+Var 35 -> {  }
+Var 36 -> { 37 }
+Var 37 -> {  }
+Var 40 -> {  }
+Var 42 -> {  }
+Var 45 -> { 46 }
+Var 46 -> {  }
+Var 48 -> { 12 }
+Var 51 -> { 52 }
+Var 52 -> {  }
+Var 54 -> { 12 }
+Var 57 -> { 58 }
+Var 58 -> {  }
+Var 60 -> {  }
+Var 61 -> {  }
+Var 62 -> { 63 }
+Var 63 -> {  }
+Var 64 -> { 65 }
+Var 65 -> {  }
+Var 68 -> { 12 }
+Var 69 -> {  }
+Var 70 -> {  }
+Var 71 -> {  }
+Var 74 -> { 75 }
+Var 75 -> {  }
+Var 77 -> { 78 }
+Var 78 -> { 82 }
+Var 79 -> { 80 }
+Var 80 -> { 84 }
+Var 81 -> { 82 }
+Var 82 -> {  }
+Var 83 -> { 84 }
+Var 84 -> {  }
+Var 88 -> {  }
+Var 89 -> {  }
+Var 91 -> {  }
+Var 92 -> {  }
+Var 93 -> {  }
+Var 94 -> {  }
+Var 96 -> { 97 }
+Var 97 -> {  }
+Var 100 -> {  }
+Var 101 -> {  }
+===============================================
