@@ -1,9 +1,10 @@
-/**
- * Andersen.cpp
- * @author kisslune
- */
+
 
 #include "A5Header.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <deque>
 
 using namespace llvm;
 using namespace std;
@@ -18,248 +19,162 @@ int main(int argc, char** argv)
 
     SVF::SVFIRBuilder builder;
     auto pag = builder.build();
+
+    // 构建约束图（本实现不直接依赖其 API；但课堂给了它的构建）
     auto consg = new SVF::ConstraintGraph(pag);
-    consg->dump();
+
+    // consg->dump();
 
     Andersen andersen(consg);
-
-    // TODO: complete the following method
     andersen.runPointerAnalysis();
-
     andersen.dumpResult();
+
     SVF::LLVMModuleSet::releaseLLVMModuleSet();
-	return 0;
+    return 0;
 }
 
 
 void Andersen::runPointerAnalysis()
 {
-    // TODO: complete this method. Point-to set and worklist are defined in A5Header.h
-    //  The implementation of constraint graph is provided in the SVF library
-    WorkList<unsigned> workList;
+    using NodeID = unsigned;
 
-    for (auto it = consg->begin(); it != consg->end(); it++)
-    {
-        auto p = it->first;
-        SVF::ConstraintNode *node = it->second;
+    // ----------------------------------------------------
+    // 1) 从 SVFIR(PAG) 收集基本约束边
+    // ----------------------------------------------------
+    SVF::SVFIR* pag = SVF::PAG::getPAG();
 
-        for (auto edge : node->getAddrInEdges())
-        {
-            SVF::AddrCGEdge *addrEdge = SVF::SVFUtil::dyn_cast<SVF::AddrCGEdge>(edge);
-            auto srcId = addrEdge->getSrcID();
-            auto dstId = addrEdge->getDstID();
+    struct SimpleEdge { NodeID src; NodeID dst; };
+    std::vector<SimpleEdge> addrEdges;   // x --Addr--> a           (x = &a)
+    std::vector<SimpleEdge> copyEdges;   // y --Copy--> x           (x = y)
+    std::vector<SimpleEdge> loadEdges;   // p --Load--> x           (x = *p)
+    std::vector<SimpleEdge> storeEdges;  // q --Store--> p          (*p = q)
 
-            pts[dstId].insert(srcId);
-            workList.push(dstId);
-        }
+    // 基本 Addr/Copy
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Addr)) {
+        addrEdges.push_back({edge->getSrcID(), edge->getDstID()});
+    }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Copy)) {
+        copyEdges.push_back({edge->getSrcID(), edge->getDstID()});
     }
 
-    while (!workList.empty())
-    {
-        auto p = workList.pop();
-        SVF::ConstraintNode *pNode = consg->getConstraintNode(p);
-
-        // for each o ∈ pts(p)
-        for (auto o : pts[p])
-        {
-            // for each q --Store--> p
-            for (auto edge : pNode->getStoreInEdges())
-            {
-                SVF::StoreCGEdge *storeEdge = SVF::SVFUtil::dyn_cast<SVF::StoreCGEdge>(edge);
-                auto q = storeEdge->getSrcID();
-
-                // q --Copy--> o exist?
-                bool exist = false;
-                SVF::ConstraintNode *qNode = consg->getConstraintNode(q);
-                for (auto copyEdge : qNode->getCopyOutEdges())
-                {
-                    if (copyEdge->getDstID() == o)
-                    {
-                        exist = true;
-                        break;
-                    }
-                }
-
-                if (!exist)
-                {
-                    consg->addCopyCGEdge(q, o);
-                    workList.push(q);
-                }
-            }
-
-            // for each p --Load--> r
-            for (auto edge : pNode->getLoadOutEdges())
-            {
-                SVF::LoadCGEdge *loadEdge = SVF::SVFUtil::dyn_cast<SVF::LoadCGEdge>(edge);
-                auto r = loadEdge->getDstID();
-
-                // o --Copy--> r exist?
-                bool exist = false;
-                SVF::ConstraintNode *rNode = consg->getConstraintNode(r);
-                for (auto copyEdge : rNode->getCopyInEdges())
-                {
-                    if (copyEdge->getSrcID() == o)
-                    {
-                        exist = true;
-                        break;
-                    }
-                }
-
-                if (!exist)
-                {
-                    consg->addCopyCGEdge(o, r);
-                    workList.push(o);
-                }
-            }
-        }
-
-        // for each p --Copy--> x
-        for (auto edge : pNode->getCopyOutEdges())
-        {
-            SVF::CopyCGEdge *copyEdge = SVF::SVFUtil::dyn_cast<SVF::CopyCGEdge>(edge);
-            auto x = copyEdge->getDstID();
-
-            auto oldSize = pts[x].size();
-            pts[x].insert(pts[p].begin(), pts[p].end());
-
-            // pts(x) changed?
-            if (pts[x].size() != oldSize)
-            {
-                workList.push(x);
-            }
-        }
-
-        // for each p --Gep.fld--> x
-        for (auto edge : pNode->getGepOutEdges())
-        {
-            SVF::GepCGEdge *gepEdge = SVF::SVFUtil::dyn_cast<SVF::GepCGEdge>(edge);
-            auto x = gepEdge->getDstID();
-
-            auto oldSize = pts[x].size();
-            for (auto o : pts[p])
-            {
-                auto fieldObj = consg->getGepObjVar(o, gepEdge);
-                pts[x].insert(fieldObj);
-            }
-
-            // pts(x) changed?
-            if (pts[x].size() != oldSize)
-            {
-                workList.push(x);
-            }
+    // Phi, Select, Call, Ret, ThreadFork/Join 视为 Copy（流不敏感、全局分析）
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Phi)) {
+        const SVF::PhiStmt *phi = SVF::SVFUtil::cast<SVF::PhiStmt>(edge);
+        for (const auto opVar : phi->getOpndVars()) {
+            copyEdges.push_back({opVar->getId(), phi->getResID()});
         }
     }
-}
-
-
-/*
-void Andersen::runPointerAnalysis()
-{
-    WorkList<SVF::ConstraintEdge*> worklist;
-    
-    // Initialize worklist with all edges in constraint graph
-    for (auto nodeIt = consg->begin(); nodeIt != consg->end(); ++nodeIt) {
-        auto node = nodeIt->second;
-        // Add all outgoing edges from this node
-        for (auto edgeIt = node->OutEdgeBegin(); edgeIt != node->OutEdgeEnd(); ++edgeIt) {
-            worklist.push(*edgeIt);
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Select)) {
+        const SVF::SelectStmt *sel = SVF::SVFUtil::cast<SVF::SelectStmt>(edge);
+        for (const auto opVar : sel->getOpndVars()) {
+            copyEdges.push_back({opVar->getId(), sel->getResID()});
         }
     }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Call)) {
+        copyEdges.push_back({edge->getSrcID(), edge->getDstID()});
+    }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Ret)) {
+        copyEdges.push_back({edge->getSrcID(), edge->getDstID()});
+    }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::ThreadFork)) {
+        copyEdges.push_back({edge->getSrcID(), edge->getDstID()});
+    }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::ThreadJoin)) {
+        copyEdges.push_back({edge->getSrcID(), edge->getDstID()});
+    }
 
-    // Process constraints until fixed point
-    while (!worklist.empty()) {
-        auto edge = worklist.pop();
-        auto src = edge->getSrcID();
-        auto dst = edge->getDstID();
+    // Load / Store
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Load)) {
+        loadEdges.push_back({edge->getSrcID(), edge->getDstID()});  // p -> x
+    }
+    for (SVF::PAGEdge *edge : pag->getSVFStmtSet(SVF::PAGEdge::Store)) {
+        storeEdges.push_back({edge->getSrcID(), edge->getDstID()}); // q -> p
+    }
 
-        switch (edge->getEdgeKind()) {
-            case SVF::ConstraintEdge::Addr: {  // dst = &src
-                auto& dstSet = pts[dst];
-                if (dstSet.insert(src).second) {
-                    // If points-to set changed, add outgoing edges of dst to worklist
-                    auto dstNode = consg->getGNode(dst);
-                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
-                        worklist.push(*it);
-                    }
-                }
-                break;
+    // ----------------------------------------------------
+    // 2) 构建辅助结构：复制后继、load/store 基指针映射
+    // ----------------------------------------------------
+    // pts[v] 已在类中定义：map<unsigned, set<unsigned>>
+    std::unordered_map<NodeID, std::vector<NodeID>> copySucc;      // v 的复制后继
+    std::unordered_map<NodeID, std::unordered_set<NodeID>> copySuccSet; // 去重
+    std::unordered_map<NodeID, std::vector<NodeID>> loadBase;      // p -> [x...] (x = *p)
+    std::unordered_map<NodeID, std::vector<NodeID>> storeBase;     // p -> [q...] (*p = q)
+
+    for (const auto &e : copyEdges) {
+        copySucc[e.src].push_back(e.dst);
+        copySuccSet[e.src].insert(e.dst);
+    }
+    for (const auto &e : loadEdges) {
+        loadBase[e.src].push_back(e.dst);
+    }
+    for (const auto &e : storeEdges) {
+        storeBase[e.dst].push_back(e.src);   // 记录到 p：谁往 *p 里存
+    }
+
+    // 记录 (p,o) 已处理，避免针对同一 o∈PT(p) 反复生成间接复制边
+    std::unordered_map<NodeID, std::unordered_set<NodeID>> processedPO;
+
+    // ----------------------------------------------------
+    // 3) 工作队列固定点
+    // ----------------------------------------------------
+    std::deque<NodeID> wl;
+    std::unordered_set<NodeID> inWL;
+
+    auto enqueue = [&](NodeID n) {
+        if (!inWL.count(n)) { wl.push_back(n); inWL.insert(n); }
+    };
+
+    auto addPts = [&](NodeID v, NodeID o) -> bool {
+        std::set<NodeID> &S = pts[v];
+        if (S.insert(o).second) { enqueue(v); return true; }
+        return false;
+    };
+
+    // 初始化：Addr 约束
+    for (const auto &e : addrEdges) {
+        addPts(e.src, e.dst);  // PT(x) ⊇ {a}
+    }
+
+    // 主循环
+    while (!wl.empty()) {
+        NodeID v = wl.front(); wl.pop_front(); inWL.erase(v);
+
+        // (a) 复制传播：PT(succ) ⊇ PT(v)
+        auto itSucc = copySucc.find(v);
+        if (itSucc != copySucc.end()) {
+            for (NodeID w : itSucc->second) {
+                for (NodeID o : pts[v]) addPts(w, o);
             }
-            case SVF::ConstraintEdge::Copy: {  // dst = src
-                bool changed = false;
-                auto& srcSet = pts[src];
-                auto& dstSet = pts[dst];
-                for (auto pointee : srcSet) {
-                    if (dstSet.insert(pointee).second) {
-                        changed = true;
+        }
+
+        // (b) 针对每个 o∈PT(v) 处理由 load/store 诱导的间接复制
+        for (NodeID o : pts[v]) {
+            if (processedPO[v].count(o)) continue;
+            processedPO[v].insert(o);
+
+            // Load：v --Load--> x  ⇒  o --Copy--> x  ⇒ PT(x) ⊇ PT(o)
+            auto itL = loadBase.find(v);
+            if (itL != loadBase.end()) {
+                for (NodeID x : itL->second) {
+                    if (!copySuccSet[o].count(x)) {
+                        copySucc[o].push_back(x);
+                        copySuccSet[o].insert(x);
                     }
+                    for (NodeID oo : pts[o]) addPts(x, oo);
                 }
-                if (changed) {
-                    auto dstNode = consg->getGNode(dst);
-                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
-                        worklist.push(*it);
-                    }
-                }
-                break;
             }
-            case SVF::ConstraintEdge::Load: {  // dst = *src
-                auto& srcPointees = pts[src];
-                bool changed = false;
-                for (auto pointee : srcPointees) {
-                    auto& pointeeSet = pts[pointee];
-                    auto& dstSet = pts[dst];
-                    for (auto val : pointeeSet) {
-                        if (dstSet.insert(val).second) {
-                            changed = true;
-                        }
+
+            // Store：q --Store--> v  ⇒  q --Copy--> o  ⇒ PT(o) ⊇ PT(q)
+            auto itS = storeBase.find(v);
+            if (itS != storeBase.end()) {
+                for (NodeID qNode : itS->second) {
+                    if (!copySuccSet[qNode].count(o)) {
+                        copySucc[qNode].push_back(o);
+                        copySuccSet[qNode].insert(o);
                     }
+                    for (NodeID qq : pts[qNode]) addPts(o, qq);
                 }
-                if (changed) {
-                    auto dstNode = consg->getGNode(dst);
-                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
-                        worklist.push(*it);
-                    }
-                }
-                break;
             }
-            case SVF::ConstraintEdge::NormalGep:
-            case SVF::ConstraintEdge::VariantGep: { // dst = gep src  (treat as copy for field-insensitive handling)
-                bool changed = false;
-                auto& srcSet = pts[src];
-                auto& dstSet = pts[dst];
-                for (auto pointee : srcSet) {
-                    if (dstSet.insert(pointee).second) {
-                        changed = true;
-                    }
-                }
-                if (changed) {
-                    auto dstNode = consg->getGNode(dst);
-                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
-                        worklist.push(*it);
-                    }
-                }
-                break;
-            }
-            case SVF::ConstraintEdge::Store: {  // *dst = src
-                auto& dstPointees = pts[dst];
-                auto& srcSet = pts[src];
-                bool changed = false;
-                for (auto pointee : dstPointees) {
-                    auto& pointeeSet = pts[pointee];
-                    for (auto val : srcSet) {
-                        if (pointeeSet.insert(val).second) {
-                            changed = true;
-                            auto pointeeNode = consg->getGNode(pointee);
-                            for (auto it = pointeeNode->OutEdgeBegin(); it != pointeeNode->OutEdgeEnd(); ++it) {
-                                worklist.push(*it);
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            default:
-                break;
         }
     }
 }
-    */
