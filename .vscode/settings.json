@@ -1,0 +1,8 @@
+{
+    "cmake.configureEnvironment": {
+        "SVF_DIR": "/home/zyl94/SVF/Release-build",
+        "LLVM_DIR": "/home/zyl94/SVF/llvm-16.0.0.obj/lib/cmake/llvm"
+    },
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.generator": "Unix Makefiles"
+}

@@ -36,172 +36,230 @@ void Andersen::runPointerAnalysis()
 {
     // TODO: complete this method. Point-to set and worklist are defined in A5Header.h
     //  The implementation of constraint graph is provided in the SVF library
-    WorkList<SVF::ConstraintNode *> worklist;
+    WorkList<unsigned> workList;
 
-    // Initialize worklist with all constraint nodes
-    for (auto it = consg->begin(); it != consg->end(); ++it)
+    for (auto it = consg->begin(); it != consg->end(); it++)
     {
-        worklist.push(it->second);
-    }
-
-    // Initialize points-to sets
-    for (auto it = consg->begin(); it != consg->end(); ++it)
-    {
+        auto p = it->first;
         SVF::ConstraintNode *node = it->second;
-        pts[node->getId()] = std::set<unsigned>();
-    }
 
-    // Process address constraints first
-    for (auto it = consg->begin(); it != consg->end(); ++it)
-    {
-        SVF::ConstraintNode *node = it->second;
-        for (SVF::ConstraintEdge *edge : node->getAddrInEdges())
+        for (auto edge : node->getAddrInEdges())
         {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::Addr)
-            {
-                SVF::ConstraintNode *srcNode = edge->getSrcNode();
-                SVF::ConstraintNode *dstNode = edge->getDstNode();
-                pts[dstNode->getId()].insert(srcNode->getId());
-                worklist.push(dstNode);
-            }
+            SVF::AddrCGEdge *addrEdge = SVF::SVFUtil::dyn_cast<SVF::AddrCGEdge>(edge);
+            auto srcId = addrEdge->getSrcID();
+            auto dstId = addrEdge->getDstID();
+
+            pts[dstId].insert(srcId);
+            workList.push(dstId);
         }
     }
 
-    // Main worklist algorithm
-    while (!worklist.empty())
+    while (!workList.empty())
     {
-        SVF::ConstraintNode *node = worklist.pop();
+        auto p = workList.pop();
+        SVF::ConstraintNode *pNode = consg->getConstraintNode(p);
 
-        // Process copy constraints
-        for (SVF::ConstraintEdge *edge : node->getCopyOutEdges())
+        // for each o ∈ pts(p)
+        for (auto o : pts[p])
         {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::Copy)
+            // for each q --Store--> p
+            for (auto edge : pNode->getStoreInEdges())
             {
-                SVF::ConstraintNode *dstNode = edge->getDstNode();
-                bool changed = false;
+                SVF::StoreCGEdge *storeEdge = SVF::SVFUtil::dyn_cast<SVF::StoreCGEdge>(edge);
+                auto q = storeEdge->getSrcID();
 
-                // Propagate points-to information
-                for (unsigned pointee : pts[node->getId()])
+                // q --Copy--> o exist?
+                bool exist = false;
+                SVF::ConstraintNode *qNode = consg->getConstraintNode(q);
+                for (auto copyEdge : qNode->getCopyOutEdges())
                 {
-                    if (pts[dstNode->getId()].insert(pointee).second)
+                    if (copyEdge->getDstID() == o)
                     {
-                        changed = true;
+                        exist = true;
+                        break;
                     }
                 }
 
-                if (changed)
+                if (!exist)
                 {
-                    worklist.push(dstNode);
+                    consg->addCopyCGEdge(q, o);
+                    workList.push(q);
+                }
+            }
+
+            // for each p --Load--> r
+            for (auto edge : pNode->getLoadOutEdges())
+            {
+                SVF::LoadCGEdge *loadEdge = SVF::SVFUtil::dyn_cast<SVF::LoadCGEdge>(edge);
+                auto r = loadEdge->getDstID();
+
+                // o --Copy--> r exist?
+                bool exist = false;
+                SVF::ConstraintNode *rNode = consg->getConstraintNode(r);
+                for (auto copyEdge : rNode->getCopyInEdges())
+                {
+                    if (copyEdge->getSrcID() == o)
+                    {
+                        exist = true;
+                        break;
+                    }
+                }
+
+                if (!exist)
+                {
+                    consg->addCopyCGEdge(o, r);
+                    workList.push(o);
                 }
             }
         }
 
-        // Process load constraints
-        for (SVF::ConstraintEdge *edge : node->getLoadOutEdges())
+        // for each p --Copy--> x
+        for (auto edge : pNode->getCopyOutEdges())
         {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::Load)
+            SVF::CopyCGEdge *copyEdge = SVF::SVFUtil::dyn_cast<SVF::CopyCGEdge>(edge);
+            auto x = copyEdge->getDstID();
+
+            auto oldSize = pts[x].size();
+            pts[x].insert(pts[p].begin(), pts[p].end());
+
+            // pts(x) changed?
+            if (pts[x].size() != oldSize)
             {
-                SVF::ConstraintNode *dstNode = edge->getDstNode();
-                bool changed = false;
-
-                for (unsigned pointee : pts[node->getId()])
-                {
-                    // For each object that node points to, propagate its points-to set
-                    SVF::ConstraintNode *objNode = consg->getConstraintNode(pointee);
-                    if (objNode)
-                    {
-                        for (unsigned indirectPointee : pts[objNode->getId()])
-                        {
-                            if (pts[dstNode->getId()].insert(indirectPointee).second)
-                            {
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-
-                if (changed)
-                {
-                    worklist.push(dstNode);
-                }
+                workList.push(x);
             }
         }
 
-        // Process store constraints
-        for (SVF::ConstraintEdge *edge : node->getStoreOutEdges())
+        // for each p --Gep.fld--> x
+        for (auto edge : pNode->getGepOutEdges())
         {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::Store)
-            {
-                SVF::ConstraintNode *dstNode = edge->getDstNode();
-                bool changed = false;
+            SVF::GepCGEdge *gepEdge = SVF::SVFUtil::dyn_cast<SVF::GepCGEdge>(edge);
+            auto x = gepEdge->getDstID();
 
-                for (unsigned pointee : pts[node->getId()])
-                {
-                    // For each object that node points to, add dstNode's points-to set to it
-                    SVF::ConstraintNode *objNode = consg->getConstraintNode(pointee);
-                    if (objNode)
-                    {
-                        for (unsigned dstPointee : pts[dstNode->getId()])
-                        {
-                            if (pts[objNode->getId()].insert(dstPointee).second)
-                            {
-                                changed = true;
-                                worklist.push(objNode);
-                            }
-                        }
-                    }
-                }
+            auto oldSize = pts[x].size();
+            for (auto o : pts[p])
+            {
+                auto fieldObj = consg->getGepObjVar(o, gepEdge);
+                pts[x].insert(fieldObj);
             }
-        }
 
-        // Process GEP constraints (if needed)
-        for (SVF::ConstraintEdge *edge : node->getGepOutEdges())
-        {
-            if (edge->getEdgeKind() == SVF::ConstraintEdge::NormalGep ||
-                edge->getEdgeKind() == SVF::ConstraintEdge::VariantGep)
+            // pts(x) changed?
+            if (pts[x].size() != oldSize)
             {
-                // Handle GEP constraints - simplified version
-                SVF::ConstraintNode *dstNode = edge->getDstNode();
-                bool changed = false;
-
-                for (unsigned pointee : pts[node->getId()])
-                {
-                    // For field-sensitive analysis, we would adjust the offset
-                    // Here we use a simplified approach that ignores offsets
-                    if (pts[dstNode->getId()].insert(pointee).second)
-                    {
-                        changed = true;
-                    }
-                }
-
-                if (changed)
-                {
-                    worklist.push(dstNode);
-                }
+                workList.push(x);
             }
         }
     }
 }
-void Andersen::dumpResult()
+
+
+/*
+void Andersen::runPointerAnalysis()
 {
-    using namespace std;
-    using namespace SVF;
-
-    std::cout << "========== Andersen Points-to Results ==========" << std::endl;
-
-    for (const auto &entry : pts)
-    {
-        unsigned varID = entry.first;
-        const std::set<unsigned> &pointees = entry.second;
-
-        std::cout << "Var " << varID << " -> { ";
-        for (auto it = pointees.begin(); it != pointees.end(); ++it)
-        {
-            if (it != pointees.begin()) std::cout << ", ";
-            std::cout << *it;
+    WorkList<SVF::ConstraintEdge*> worklist;
+    
+    // Initialize worklist with all edges in constraint graph
+    for (auto nodeIt = consg->begin(); nodeIt != consg->end(); ++nodeIt) {
+        auto node = nodeIt->second;
+        // Add all outgoing edges from this node
+        for (auto edgeIt = node->OutEdgeBegin(); edgeIt != node->OutEdgeEnd(); ++edgeIt) {
+            worklist.push(*edgeIt);
         }
-        std::cout << " }" << std::endl;
     }
 
-    std::cout << "===============================================" << std::endl;
+    // Process constraints until fixed point
+    while (!worklist.empty()) {
+        auto edge = worklist.pop();
+        auto src = edge->getSrcID();
+        auto dst = edge->getDstID();
+
+        switch (edge->getEdgeKind()) {
+            case SVF::ConstraintEdge::Addr: {  // dst = &src
+                auto& dstSet = pts[dst];
+                if (dstSet.insert(src).second) {
+                    // If points-to set changed, add outgoing edges of dst to worklist
+                    auto dstNode = consg->getGNode(dst);
+                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
+                        worklist.push(*it);
+                    }
+                }
+                break;
+            }
+            case SVF::ConstraintEdge::Copy: {  // dst = src
+                bool changed = false;
+                auto& srcSet = pts[src];
+                auto& dstSet = pts[dst];
+                for (auto pointee : srcSet) {
+                    if (dstSet.insert(pointee).second) {
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    auto dstNode = consg->getGNode(dst);
+                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
+                        worklist.push(*it);
+                    }
+                }
+                break;
+            }
+            case SVF::ConstraintEdge::Load: {  // dst = *src
+                auto& srcPointees = pts[src];
+                bool changed = false;
+                for (auto pointee : srcPointees) {
+                    auto& pointeeSet = pts[pointee];
+                    auto& dstSet = pts[dst];
+                    for (auto val : pointeeSet) {
+                        if (dstSet.insert(val).second) {
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed) {
+                    auto dstNode = consg->getGNode(dst);
+                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
+                        worklist.push(*it);
+                    }
+                }
+                break;
+            }
+            case SVF::ConstraintEdge::NormalGep:
+            case SVF::ConstraintEdge::VariantGep: { // dst = gep src  (treat as copy for field-insensitive handling)
+                bool changed = false;
+                auto& srcSet = pts[src];
+                auto& dstSet = pts[dst];
+                for (auto pointee : srcSet) {
+                    if (dstSet.insert(pointee).second) {
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    auto dstNode = consg->getGNode(dst);
+                    for (auto it = dstNode->OutEdgeBegin(); it != dstNode->OutEdgeEnd(); ++it) {
+                        worklist.push(*it);
+                    }
+                }
+                break;
+            }
+            case SVF::ConstraintEdge::Store: {  // *dst = src
+                auto& dstPointees = pts[dst];
+                auto& srcSet = pts[src];
+                bool changed = false;
+                for (auto pointee : dstPointees) {
+                    auto& pointeeSet = pts[pointee];
+                    for (auto val : srcSet) {
+                        if (pointeeSet.insert(val).second) {
+                            changed = true;
+                            auto pointeeNode = consg->getGNode(pointee);
+                            for (auto it = pointeeNode->OutEdgeBegin(); it != pointeeNode->OutEdgeEnd(); ++it) {
+                                worklist.push(*it);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
 }
+    */
